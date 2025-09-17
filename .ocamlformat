@@ -1,0 +1,6 @@
+version=0.27.0
+profile=default
+
+type-decl=sparse
+break-separators=after
+break-infix=fit-or-vertical

@@ -1,0 +1,4 @@
+(library
+ (name ocron)
+ (preprocess (pps ppx_sexp_conv ppx_compare ppx_deriving.show ppx_let))
+ (libraries base sexplib))

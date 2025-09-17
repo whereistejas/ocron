@@ -1,0 +1,5 @@
+(library
+ (name test_ocron)
+ (inline_tests)
+ (preprocess (pps ppx_inline_test ppx_assert ppx_sexp_conv))
+ (libraries ocron base sexplib))
