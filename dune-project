@@ -21,4 +21,7 @@
   sexplib
   ppx_sexp_conv
   ppx_compare
-  ppx_deriving))
+  ppx_deriving
+  ppx_let
+  (ppx_inline_test :with-test)
+  (ppx_assert :with-test)))
