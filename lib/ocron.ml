@@ -338,12 +338,13 @@ module Element = struct
     | Range of ('time * 'time)
   [@@deriving sexp, compare, show]
 
-  let parse (value : string) (parse : string -> 'time) : 'time t option =
+  let parse (value : string) (parse : string -> 'time) : 'time t =
     match value with
     | value when String.contains value '-' ->
         String.lsplit2 ~on:'-' value
         |> Option.map ~f:(fun (min, max) -> Range (parse max, parse min))
-    | value -> Some (Single (parse value))
+        |> Option.value_exn
+    | value -> Single (parse value)
 end
 
 module Value = struct
@@ -353,18 +354,16 @@ module Value = struct
     | List of 'time Element.t list
   [@@deriving sexp, compare, show]
 
-  let parse (value : string) (parse : string -> 'time) : 'time t option =
+  let parse (value : string) (parse : string -> 'time) : 'time t =
     match value with
-    | "*" -> Some All
+    | "*" -> All
     | value when String.contains value ',' ->
         let elements =
           String.split value ~on:','
-          |> List.map ~f:(fun value ->
-                 Element.parse value parse |> Option.value_exn)
+          |> List.map ~f:(fun value -> Element.parse value parse)
         in
-        Some (List elements)
-    (* TODO: Implement parsing logic for single range *)
-    | _ -> None
+        List elements
+    | value -> Value (Element.parse value parse)
 end
 
 (*
@@ -406,13 +405,12 @@ module Schedule = struct
         (minute_str, hour_str, day_str, month_str, dow_str)
     | _ -> raise (Invalid_argument "Invalid cron expression")
 
-  let parse (value : string) : t option =
-    let ( let* ) opt f = Option.bind opt ~f in
+  let parse (value : string) : t =
     let minute_str, hour_str, day_str, month_str, dow_str = tokenise value in
-    let* minute = Value.parse minute_str Minute.parse in
-    let* hour = Value.parse hour_str Hour.parse in
-    let* day_of_the_month = Value.parse day_str DayOfTheMonth.parse in
-    let* month_of_the_year = Value.parse month_str MonthOfTheYear.parse in
-    let* day_of_the_week = Value.parse dow_str DayOfTheWeek.parse in
-    Some { minute; hour; day_of_the_month; month_of_the_year; day_of_the_week }
+    let minute = Value.parse minute_str Minute.parse in
+    let hour = Value.parse hour_str Hour.parse in
+    let day_of_the_month = Value.parse day_str DayOfTheMonth.parse in
+    let month_of_the_year = Value.parse month_str MonthOfTheYear.parse in
+    let day_of_the_week = Value.parse dow_str DayOfTheWeek.parse in
+    { minute; hour; day_of_the_month; month_of_the_year; day_of_the_week }
 end
