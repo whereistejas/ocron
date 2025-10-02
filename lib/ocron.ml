@@ -327,45 +327,6 @@ module Time = struct
   end
 end
 
-(* Each of these patterns can be either an asterisk (meaning all valid values),
-an element, or a list of elements separated by commas.
-
-An element shall be either a number or two numbers separated by a hyphen (meaning an inclusive range).
-*)
-module Element = struct
-  type 'time t =
-    | Single of 'time
-    | Range of ('time * 'time)
-  [@@deriving sexp, compare, show]
-
-  let parse (value : string) (parse : string -> 'time) : 'time t =
-    match value with
-    | value when String.contains value '-' ->
-        String.lsplit2 ~on:'-' value
-        |> Option.map ~f:(fun (min, max) -> Range (parse max, parse min))
-        |> Option.value_exn
-    | value -> Single (parse value)
-end
-
-module Value = struct
-  type 'time t =
-    | All
-    | Value of 'time Element.t
-    | List of 'time Element.t list
-  [@@deriving sexp, compare, show]
-
-  let parse (value : string) (parse : string -> 'time) : 'time t =
-    match value with
-    | "*" -> All
-    | value when String.contains value ',' ->
-        let elements =
-          String.split value ~on:','
-          |> List.map ~f:(fun value -> Element.parse value parse)
-        in
-        List elements
-    | value -> Value (Element.parse value parse)
-end
-
 (*
 The specification of days can be made by two fields (day of the month and
 day of the week). If month, day of month, and day of week are all asterisks,
@@ -383,14 +344,53 @@ be matched.
 module Schedule = struct
   open Time
 
-  type t = {
-    minute : Minute.t Value.t;
-    hour : Hour.t Value.t;
-    day_of_the_month : DayOfTheMonth.t Value.t;
-    month_of_the_year : MonthOfTheYear.t Value.t;
-    day_of_the_week : DayOfTheWeek.t Value.t;
+  (* An element shall be either a number or two numbers separated by
+  a hyphen (meaning an inclusive range). *)
+  type 'time element =
+    | Single of 'time
+    | Range of {
+        max : 'time;
+        min : 'time;
+      }
+  [@@deriving sexp, compare, show]
+
+  (* Each of these patterns can be either an asterisk (meaning
+  all valid values), an element, or a list of elements separated
+  by commas. *)
+  and 'time value =
+    | All
+    | Value of 'time element
+    | List of 'time element list
+  [@@deriving sexp, compare, show]
+
+  and t = {
+    minute : Minute.t value;
+    hour : Hour.t value;
+    day_of_the_month : DayOfTheMonth.t value;
+    month_of_the_year : MonthOfTheYear.t value;
+    day_of_the_week : DayOfTheWeek.t value;
   }
   [@@deriving sexp, compare, show]
+
+  let parse_element (value : string) (parse : string -> 'time) : 'time element =
+    match value with
+    | value when String.contains value '-' ->
+        String.lsplit2 ~on:'-' value
+        |> Option.map ~f:(fun (min, max) ->
+               Range { max = parse max; min = parse min })
+        |> Option.value_exn
+    | value -> Single (parse value)
+
+  let parse_value (value : string) (parse : string -> 'time) : 'time value =
+    match value with
+    | "*" -> All
+    | value when String.contains value ',' ->
+        let elements =
+          String.split value ~on:','
+          |> List.map ~f:(fun value -> parse_element value parse)
+        in
+        List elements
+    | value -> Value (parse_element value parse)
 
   let tokenise value : string * string * string * string * string =
     let fields =
@@ -407,10 +407,10 @@ module Schedule = struct
 
   let parse (value : string) : t =
     let minute_str, hour_str, day_str, month_str, dow_str = tokenise value in
-    let minute = Value.parse minute_str Minute.parse in
-    let hour = Value.parse hour_str Hour.parse in
-    let day_of_the_month = Value.parse day_str DayOfTheMonth.parse in
-    let month_of_the_year = Value.parse month_str MonthOfTheYear.parse in
-    let day_of_the_week = Value.parse dow_str DayOfTheWeek.parse in
+    let minute = parse_value minute_str Minute.parse in
+    let hour = parse_value hour_str Hour.parse in
+    let day_of_the_month = parse_value day_str DayOfTheMonth.parse in
+    let month_of_the_year = parse_value month_str MonthOfTheYear.parse in
+    let day_of_the_week = parse_value dow_str DayOfTheWeek.parse in
     { minute; hour; day_of_the_month; month_of_the_year; day_of_the_week }
 end
