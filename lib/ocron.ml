@@ -4,86 +4,66 @@ module Time = Time_float_unix
 module Span = Time.Span
 module Zone = Time.Zone
 
+type 'span element =
+  | Single of 'span
+  | Range of {
+      max : 'span;
+      min : 'span;
+    }
+[@@deriving sexp, compare]
+
+type 'span value =
+  | All
+  | Value of 'span element
+  | List of 'span element list
+[@@deriving sexp, compare]
+
+type schedule = {
+  (* Valid values: [0,59] *)
+  minute : Span.t value;
+  (* Valid values: [0,23] *)
+  hour : Span.t value;
+  (* Valid values: [1,31] *)
+  day_of_month : Span.t value;
+  (* Valid values: [1,12] *)
+  month : Month.t value;
+  (* Valid values: [0,6] with 0=Sunday *)
+  day_of_week : Day_of_week.t value;
+}
+[@@deriving sexp, compare]
+
+type intermediate_schedule = {
+  minute : Span.t list;
+  hour : Span.t list;
+  day_of_month : Span.t list;
+  month : Month.t list;
+  day_of_week : Day_of_week.t list;
+  (* TODO: Collapse above day and month fields into [dates] *)
+  dates : Date.t list;
+}
+[@@deriving sexp, compare]
+
+let max_minute : int = 59
+let min_minute : int = 0
+let max_hour : int = 23
+let min_hour : int = 0
+let max_day_of_month : int = 31
+let min_day_of_month : int = 1
+
 module U = struct
-  (** Returns current time with minutes and seconds set to zero. *)
-  let truncate_hr (time : Time.t) : Time.t =
-    let zone = Lazy.force Zone.local in
-    let date = Time.to_date ~zone time in
-    let ofday_parts = Time.to_ofday ~zone time |> Time.Ofday.to_parts in
-    let ofday =
-      Time.Ofday.create ~hr:ofday_parts.hr ~min:0 ~sec:0 ~ms:0 ~us:0 ~ns:0 ()
-    in
-    Time.of_date_ofday ~zone date ofday
+  let print_debug name sexp_of value =
+    Printf.printf "%s: %s\n" name (Sexp.to_string_hum (sexp_of value))
 
-  (** Returns current time with hours, minutes and seconds set to zero. *)
-  let truncate_day (time : Time.t) : Time.t =
-    let zone = Lazy.force Zone.local in
-    let date = Time.to_date ~zone time in
-    Time.of_date_ofday ~zone date Time.Ofday.start_of_day
-
-  (** Returns current time with days, hours, minutes and seconds set to zero. *)
-  let truncate_month (time : Time.t) : Time.t =
-    let zone = Lazy.force Zone.local in
-    let date = Time.to_date ~zone time in
-    let date = Date.create_exn ~y:(Date.year date) ~m:(Date.month date) ~d:0 in
-    Time.of_date_ofday ~zone date Time.Ofday.start_of_day
-end
-
-module Types = struct
-  type 'span element =
-    | Single of 'span
-    | Range of {
-        max : 'span;
-        min : 'span;
-      }
-  [@@deriving sexp, compare]
-
-  type 'span value =
-    | All
-    | Value of 'span element
-    | List of 'span element list
-  [@@deriving sexp, compare]
-
-  type schedule = {
-    (* Valid values: [0,59] *)
-    minute : Span.t value;
-    (* Valid values: [0,23] *)
-    hour : Span.t value;
-    (* Valid values: [1,31] *)
-    day_of_month : Span.t value;
-    (* Valid values: [1,12] *)
-    month : Month.t value;
-    (* Valid values: [0,6] with 0=Sunday *)
-    day_of_week : Day_of_week.t value;
-  }
-  [@@deriving sexp, compare]
-
-  type intermediate_schedule = {
-    minute : Span.t list;
-    hour : Span.t list;
-    day_of_month : Span.t list;
-    month : Month.t list;
-    day_of_week : Day_of_week.t list;
-    (* TODO: Collapse above day and month fields into [dates] *)
-    dates : Date.t list;
-  }
-  [@@deriving sexp, compare]
-
-  let max_minute : int = 59
-  let max_hour : int = 23
-  let max_day_of_month : int = 31
-  let max_month : int = 12
-  let max_day_of_week : int = 6
-  let min_minute : int = 0
-  let min_hour : int = 0
-  let min_day_of_month : int = 1
-  let min_month : int = 1
-  let min_day_of_week : int = 0
+  let debug_schedule
+      ({ minute; hour; day_of_month; month; _ } : intermediate_schedule) =
+    let () = print_debug "minute" [%sexp_of: Span.t list] minute in
+    let () = print_debug "hour" [%sexp_of: Span.t list] hour in
+    let () = print_debug "day_of_month" [%sexp_of: Span.t list] day_of_month in
+    let () = print_debug "month" [%sexp_of: Month.t list] month in
+    ()
 end
 
 module Parse = struct
-  open Types
-
   (** In the POSIX locale, the user or application shall ensure that a crontab *
       entry is a text file consisting of lines of six fields each. The fields *
       shall be separated by <blank>s. * * The first five fields shall be integer
@@ -140,8 +120,6 @@ module Parse = struct
 end
 
 module ToTime = struct
-  open Types
-
   (* The specification of days can be made by two fields (day
    * of the month and day of the week). If month, day of month, and day
    * of week are all <asterisk> characters, every day shall be matched.
@@ -182,6 +160,7 @@ module ToTime = struct
     | Value el -> element_to_month el
     | List els -> List.concat_map els ~f:(fun el -> element_to_month el)
 
+  (** Convert cron syntax to types that correspond to the time units *)
   let schedule_to_time ({ minute; hour; day_of_month; month; _ } : schedule) :
       intermediate_schedule =
     let minute =
@@ -206,48 +185,71 @@ module ToTime = struct
     { minute; hour; day_of_month; month; day_of_week = []; dates = [] }
 end
 
-(** Returns next occurrence after NOW according to the schedule. *)
-let next ?start_from (schedule : Types.schedule) : Time.t =
-  let open Types in
-  let open ToTime in
-  let print_debug name sexp_of value =
-    Printf.printf "%s: %s\n" name (Sexp.to_string_hum (sexp_of value))
-  in
-  let { minute; hour; day_of_month; month; _ } = schedule_to_time schedule in
-  let () = print_debug "minute" [%sexp_of: Span.t list] minute in
-  let () = print_debug "hour" [%sexp_of: Span.t list] hour in
-  let () = print_debug "day_of_month" [%sexp_of: Span.t list] day_of_month in
-  let () = print_debug "month" [%sexp_of: Month.t list] month in
-
-  let zone = Lazy.force Zone.local in
-  let rec next ~(start_date : Date.t) ~check_date ~spans : Time.t =
-    let next_date =
-      List.find_map spans ~f:(fun span ->
-          let span = Time.Ofday.of_span_since_start_of_day_exn span in
-          let next_date = Time.of_date_ofday ~zone start_date span in
-          if Time.compare next_date check_date >= 0 then Some next_date
-          else None)
+module Schedule = struct
+  let calculate_dates ?(skip_until : Month.t option) year schedule =
+    let months =
+      Option.value_map skip_until
+        ~f:(fun skip ->
+          List.filter schedule.month ~f:(fun month -> Month.( >= ) month skip))
+        ~default:schedule.month
     in
-    Option.value_or_thunk next_date ~default:(fun () ->
-        let start_date = Date.add_days start_date 1 in
-        next ~start_date ~check_date ~spans)
-  in
 
-  let spans =
-    let hours_and_minutes = List.cartesian_product hour minute in
-    List.map hours_and_minutes ~f:(fun (hr, min) -> Span.( + ) hr min)
-  in
-  let today = Option.value start_from ~default:(Time.now ()) in
-  let date = Time.to_date ~zone today in
-  let dates : Date.t list =
-    let months_and_days = List.cartesian_product month day_of_month in
-    List.map months_and_days ~f:(fun (month, day) ->
-        (* TODO: Check if days are within the limit of the month we are setting *)
-        let new_date =
-          Date.create_exn ~y:(Date.year date) ~m:month
-            ~d:(Span.to_day day |> int_of_float)
-        in
-        new_date)
-  in
-  let () = print_debug "dates" [%sexp_of: Date.t list] dates in
-  next ~start_date:date ~check_date:today ~spans
+    List.cartesian_product months schedule.day_of_month
+    |> List.filter_map ~f:(fun (month, day) ->
+           let day = Span.to_day day |> int_of_float in
+           (* NOTE: Skipping invalid days (like 29 Feb in non-leap years) *)
+           try Some (Date.create_exn ~y:year ~m:month ~d:day) with _ -> None)
+
+  let merge_dates_and_times zone dates times =
+    List.cartesian_product dates times
+    |> List.map ~f:(fun (date, time) ->
+           let parts = Span.to_parts time in
+           let ofday = Time.Ofday.create ~hr:parts.hr ~min:parts.min () in
+           Time.of_date_ofday ~zone date ofday)
+
+  (** Returns next occurrence *)
+  let next ?start_from schedule : Time.t =
+    let zone = Lazy.force Zone.local in
+
+    let s = ToTime.schedule_to_time schedule in
+    let () = U.debug_schedule s in
+
+    let today = Option.value start_from ~default:(Time.now ()) in
+    let date = Time.to_date ~zone today in
+
+    let times =
+      let hours_and_minutes = List.cartesian_product s.hour s.minute in
+      List.map hours_and_minutes ~f:(fun (hr, min) -> Span.( + ) hr min)
+    in
+
+    let next_datetime schedule times : Time.t = Time.now () in
+
+    let rec find_nearest_datetime next_datetime nearest_to : Time.t =
+      let datetime, next_datetime =
+        Option.value_exn (Sequence.next next_datetime)
+      in
+      if Time.( >= ) datetime nearest_to then datetime
+      else find_nearest_datetime next_datetime nearest_to
+    in
+
+    Time.epoch
+
+  (* let dates =
+      calculate_dates ~skip_until:(Date.month date) (Date.year date) s
+    in
+    let () = U.print_debug "dates" [%sexp_of: Date.t list] dates in
+
+    (* Find the first datetime that is >= today *)
+    let datetimes = merge_dates_and_times zone dates times in
+    match List.find datetimes ~f:(fun dt -> Time.( >= ) dt today) with
+    | Some next_time -> next_time
+    | None ->
+        (* If no match in current year, try next year *)
+        let next_year = Date.year date + 1 in
+        let new_dates = calculate_dates next_year s in
+        let datetimes = merge_dates_and_times zone new_dates times in
+        List.hd_exn datetimes *)
+end
+
+let parse = Parse.parse
+let next = Schedule.next

@@ -4,8 +4,8 @@ module Time = Time_float_unix
 module Span = Time.Span
 module Zone = Time.Zone
 
-(* let%test_unit "parse single minute value" =
-  let actual = parse_schedule "2 * * * *" in
+let%test_unit "parse single minute value" =
+  let actual = parse "2 * * * *" in
   let expected : schedule =
     {
       minute = Value (Single (Span.create ~min:2 ()));
@@ -18,7 +18,7 @@ module Zone = Time.Zone
   [%test_eq: schedule] actual expected
 
 let%test_unit "parse minute range" =
-  let actual = parse_schedule "2-5 * * * *" in
+  let actual = parse "2-5 * * * *" in
   let expected : schedule =
     {
       minute =
@@ -33,7 +33,7 @@ let%test_unit "parse minute range" =
   [%test_eq: schedule] actual expected
 
 let%test_unit "parse minute list" =
-  let actual = parse_schedule "2,3,5 * * * *" in
+  let actual = parse "2,3,5 * * * *" in
   let expected : schedule =
     {
       minute =
@@ -52,7 +52,7 @@ let%test_unit "parse minute list" =
   [%test_eq: schedule] actual expected
 
 let%test_unit "parse minute list with range and month" =
-  let actual = parse_schedule "2,3,5-9 * * 12 *" in
+  let actual = parse "2,3,5-9 * * 12 *" in
   let expected : schedule =
     {
       minute =
@@ -72,7 +72,7 @@ let%test_unit "parse minute list with range and month" =
 
 let%test_unit "next occurrence for minute" =
   let start_from = Time.now () in
-  let schedule = parse_schedule "2 * * * *" in
+  let schedule = parse "2 * * * *" in
   let actual = next schedule ~start_from in
   let expected =
     let zone = Lazy.force Zone.local in
@@ -90,7 +90,7 @@ let%test_unit "next occurrence for minute" =
 
 let%test_unit "next occurrence for minute and hour" =
   let start_from = Time.now () in
-  let schedule = parse_schedule "2 1 * * *" in
+  let schedule = parse "2 1 * * *" in
   let actual = next schedule ~start_from in
   let expected =
     let zone = Lazy.force Zone.local in
@@ -104,7 +104,45 @@ let%test_unit "next occurrence for minute and hour" =
     in
     Time.of_date_ofday ~zone date target_ofday
   in
-  [%test_eq: Time.t] actual expected *)
+  [%test_eq: Time.t] actual expected
+
+let%test_unit "next occurrence for minute and hour and day" =
+  let start_from = Time.now () in
+  let schedule = parse "2 1 1 * *" in
+  let actual = next schedule ~start_from in
+  let expected =
+    let zone = Lazy.force Zone.local in
+    let date = Time.to_date ~zone start_from in
+    let ofday = Time.Ofday.create ~hr:1 ~min:2 () in
+    let target_date =
+      Date.create_exn ~y:(Date.year date) ~m:(Date.month date) ~d:1
+    in
+    let target_time = Time.of_date_ofday ~zone target_date ofday in
+    let date =
+      if Time.( < ) start_from target_time then target_date
+      else Date.add_months target_date 1
+    in
+    Time.of_date_ofday ~zone date ofday
+  in
+  [%test_eq: Time.t] actual expected
+
+let%test_unit "next occurrence for minute and hour" =
+  let start_from = Time.now () in
+  let schedule = parse "2 1 * * *" in
+  let actual = next schedule ~start_from in
+  let expected =
+    let zone = Lazy.force Zone.local in
+    let date = Time.to_date ~zone start_from in
+    let ofday = Time.to_ofday ~zone start_from in
+    let parts = Time.Ofday.to_parts ofday in
+    let target_ofday = Time.Ofday.create ~hr:1 ~min:2 () in
+    let date =
+      if parts.hr < 1 || (parts.hr = 1 && parts.min < 2) then date
+      else Date.add_days date 1
+    in
+    Time.of_date_ofday ~zone date target_ofday
+  in
+  [%test_eq: Time.t] actual expected
 
 let%test_unit "next occurrence for minute and hour and day" =
   let start_from = Time.now () in
@@ -130,46 +168,3 @@ let%test_unit "next occurrence for minute and hour and day" =
     Time.of_date_ofday ~zone date target_ofday
   in
   [%test_eq: Time.t] actual expected
-
-(* let%test_unit "next occurrence for minute and hour" =
-  let start_from = Time.now () in
-  let schedule = parse_schedule "2 1 * * *" in
-  let actual = next schedule ~start_from in
-  let expected =
-    let zone = Lazy.force Zone.local in
-    let date = Time.to_date ~zone start_from in
-    let ofday = Time.to_ofday ~zone start_from in
-    let parts = Time.Ofday.to_parts ofday in
-    let target_ofday = Time.Ofday.create ~hr:1 ~min:2 () in
-    let date =
-      if parts.hr < 1 || (parts.hr = 1 && parts.min < 2) then date
-      else Date.add_days date 1
-    in
-    Time.of_date_ofday ~zone date target_ofday
-  in
-  [%test_eq: Time.t] actual expected
-
-let%test_unit "next occurrence for minute and hour and day" =
-  let start_from = Time.now () in
-  let schedule = parse_schedule "2 1 1 * *" in
-  let actual = next schedule ~start_from in
-  let expected =
-    let zone = Lazy.force Zone.local in
-    let date = Time.to_date ~zone start_from in
-    let ofday = Time.to_ofday ~zone start_from in
-    let parts = Time.Ofday.to_parts ofday in
-    let target_ofday = Time.Ofday.create ~hr:1 ~min:2 () in
-    let target_date =
-      Date.create_exn ~y:(Date.year date) ~m:(Date.month date) ~d:1
-    in
-    let date =
-      if
-        Date.day date < 1
-        || Date.day date = 1
-           && (parts.hr < 1 || (parts.hr = 1 && parts.min < 2))
-      then target_date
-      else Date.add_months target_date 1
-    in
-    Time.of_date_ofday ~zone date target_ofday
-  in
-  [%test_eq: Time.t] actual expected *)
