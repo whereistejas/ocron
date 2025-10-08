@@ -3,141 +3,127 @@ open Ocron
 module Time = Time_float_unix
 module Span = Time.Span
 
-(* Helper to get next N occurrences from croniter *)
+let zone = Lazy.force Time.Zone.local
+
+(* Get path to main.py in project root *)
+let main_py_path () = sprintf "%s/main.py" (Sys.getenv_exn "DUNE_SOURCEROOT")
+
+(* Format time as YYYY-MM-DD HH:MM for command line *)
+let format_time_for_cli time =
+  let date = Time.to_date ~zone time in
+  let ofday = Time.to_ofday ~zone time in
+  let parts = Time.Ofday.to_parts ofday in
+  sprintf "%04d-%02d-%02d %02d:%02d" (Date.year date)
+    (Month.to_int (Date.month date))
+    (Date.day date) parts.hr parts.min
+
+(* Build command to run main.py *)
+let build_command cron_expr start_time count =
+  sprintf "uv run python %s --start_from %s --count %d %s" (main_py_path ())
+    (Filename.quote (format_time_for_cli start_time))
+    count (Filename.quote cron_expr)
+
+(* Check if line is an error *)
+let is_error_line line =
+  String.is_prefix line ~prefix:"ERROR:"
+  || String.is_prefix line ~prefix:"Traceback"
+
+(* Parse a single datetime line from main.py output *)
+let parse_datetime_line line =
+  let stripped = String.strip line in
+  if String.is_empty stripped then None
+  else try Some (Time.of_string stripped) with _ -> None
+
+(* Process lines from command output, separating results and errors *)
+let process_lines ic =
+  let rec loop results errors =
+    match In_channel.input_line ic with
+    | None -> (List.rev results, List.rev errors)
+    | Some line -> (
+        if is_error_line line then loop results (line :: errors)
+        else
+          match parse_datetime_line line with
+          | Some time -> loop (time :: results) errors
+          | None ->
+              if String.is_empty (String.strip line) then loop results errors
+              else loop results (line :: errors))
+  in
+  loop [] []
+
+(* Get next N occurrences from main.py *)
 let get_croniter_results cron_expr start_time count =
-  let zone = Lazy.force Time.Zone.local in
-
-  let make_time year month day hr min =
-    let date = Date.create_exn ~y:year ~m:month ~d:day in
-    let ofday = Time.Ofday.create ~hr ~min () in
-    Time.of_date_ofday ~zone date ofday
-  in
-  let python_script =
-    Printf.sprintf
-      {|
-import sys
-from croniter import croniter
-from datetime import datetime
-
-cron_expr = '%s'
-start_time = datetime(%d, %d, %d, %d, %d)
-count = %d
-
-try:
-    cron = croniter(cron_expr, start_time)
-    for _ in range(count):
-        next_time = cron.get_next(datetime)
-        print(f"{next_time.year},{next_time.month},{next_time.day},{next_time.hour},{next_time.minute}")
-except Exception as e:
-    print(f"ERROR: {e}", file=sys.stderr)
-    sys.exit(1)
-|}
-      cron_expr
-      (Date.year (Time.to_date ~zone start_time))
-      (Month.to_int (Date.month (Time.to_date ~zone start_time)))
-      (Date.day (Time.to_date ~zone start_time))
-      (Time.Ofday.to_parts (Time.to_ofday ~zone start_time)).hr
-      (Time.Ofday.to_parts (Time.to_ofday ~zone start_time)).min count
-  in
-
-  let cmd =
-    Printf.sprintf "uv run python3 -c %s" (Filename.quote python_script)
-  in
+  let cmd = build_command cron_expr start_time count in
 
   try
     let ic = UnixLabels.open_process_in cmd in
-    let results = ref [] in
-    let error_lines = ref [] in
-    try
-      while true do
-        match In_channel.input_line ic with
-        | Some line -> (
-            if String.is_prefix line ~prefix:"ERROR:" then
-              error_lines := line :: !error_lines
-            else if String.is_prefix line ~prefix:"Traceback" then
-              error_lines := line :: !error_lines
-            else
-              let parts = String.split_on_chars line ~on:[ ',' ] in
-              match parts with
-              | [ year; month; day; hour; minute ] ->
-                  let t =
-                    make_time (Int.of_string year)
-                      (Month.of_int_exn (Int.of_string month))
-                      (Int.of_string day) (Int.of_string hour)
-                      (Int.of_string minute)
-                  in
-                  results := t :: !results
-              | _ when not (String.is_empty (String.strip line)) ->
-                  error_lines := line :: !error_lines
-              | _ -> ())
-        | None -> raise End_of_file
-      done;
-      []
-    with End_of_file ->
-      ignore (UnixLabels.close_process_in ic);
-      if not (List.is_empty !error_lines) then
-        failwith
-          (Printf.sprintf "croniter error: %s"
-             (String.concat ~sep:"\n" (List.rev !error_lines)))
-      else List.rev !results
+    let results, errors = process_lines ic in
+    let _ = UnixLabels.close_process_in ic in
+
+    match errors with
+    | [] -> results
+    | _ ->
+        failwith (sprintf "croniter error: %s" (String.concat ~sep:"\n" errors))
   with
   | Failure msg -> raise (Failure msg)
-  | _ ->
-      raise
-        (Failure
-           "croniter not available - install with: uv pip install croniter")
+  | _ -> raise (Failure "main.py not available or croniter not installed")
 
-(* Test cases: list of cron expressions to test *)
+(* Check if main.py is available and working *)
+let check_main_py_available () =
+  let check_cmd =
+    sprintf "uv run python %s --count 1 '0 0 * * *' 2>/dev/null >/dev/null"
+      (main_py_path ())
+  in
+  match Core_unix.system check_cmd with
+  | Ok () -> true
+  | Error _ ->
+      printf
+        "\nSkipping tests: main.py not available or croniter not installed\n";
+      false
+
+(* Create a test start time *)
+let make_start_time ~year ~month ~day ~hour ~minute =
+  let date = Date.create_exn ~y:year ~m:month ~d:day in
+  let ofday = Time.Ofday.create ~hr:hour ~min:minute () in
+  Time.of_date_ofday ~zone date ofday
+
+(* Format list of times for display *)
+let format_times times =
+  List.map times ~f:(Time.to_string_abs ~zone) |> String.concat ~sep:"\n    "
+
+(* Compare two lists of times and format error message if different *)
+let compare_results cron_expr start_from expected actual =
+  if List.equal Time.equal actual expected then Ok ()
+  else
+    Error
+      (sprintf
+         "Test failed for cron: %s\n\
+         \  Start: %s\n\
+         \  Expected (croniter):\n\
+         \    %s\n\
+         \  Actual (ocron):\n\
+         \    %s"
+         cron_expr
+         (Time.to_string_abs ~zone start_from)
+         (format_times expected) (format_times actual))
+
+(* Test a single cron expression *)
+let test_cron_expr cron_expr ~start_from ~(count : int) =
+  let upcoming_times = upcoming ~start_from ~count:5 (parse cron_expr) in
+  let actual = List.take upcoming_times count in
+  let expected = get_croniter_results cron_expr start_from count in
+  compare_results cron_expr start_from expected actual
+
+(* Test cases *)
 let test_cases = [ "30 14 * * *"; "0 0 * * 1" ]
 
 let%test_unit "compare against croniter reference implementation" =
-  let zone = Lazy.force Time.Zone.local in
-  let count = 5 in
-
-  (* Check if croniter is available first *)
-  let has_croniter =
-    let check_cmd = "uv run python3 -c 'import croniter' 2>/dev/null" in
-    match Core_unix.system check_cmd with
-    | Ok () -> true
-    | Error _ ->
-        Printf.printf
-          "\n\
-           Skipping croniter tests: croniter not installed (uv pip install \
-           croniter)\n";
-        false
-  in
-
-  if has_croniter then
+  if check_main_py_available () then
     let start_from =
-      let date = Date.create_exn ~y:2025 ~m:Month.jan ~d:15 in
-      let ofday = Time.Ofday.create ~hr:10 ~min:0 () in
-      Time.of_date_ofday ~zone date ofday
+      make_start_time ~year:2025 ~month:Month.jan ~day:15 ~hour:10 ~minute:0
     in
+    let count = 5 in
 
     List.iter test_cases ~f:(fun cron_expr ->
-        let schedule = parse cron_expr in
-        let actual_list =
-          let seq = upcoming schedule ~start_from in
-          let taken = Sequence.take seq count in
-          Sequence.to_list taken
-        in
-
-        let expected_list = get_croniter_results cron_expr start_from count in
-
-        if not (List.equal Time.equal actual_list expected_list) then
-          let format_times times =
-            List.map times ~f:(Time.to_string_abs ~zone)
-            |> String.concat ~sep:"\n    "
-          in
-          failwith
-            (Printf.sprintf
-               "Test failed for cron: %s\n\
-               \  Start: %s\n\
-               \  Expected (croniter):\n\
-               \    %s\n\
-               \  Actual (ocron):\n\
-               \    %s"
-               cron_expr
-               (Time.to_string_abs ~zone start_from)
-               (format_times expected_list)
-               (format_times actual_list)))
+        match test_cron_expr cron_expr ~start_from ~count with
+        | Ok () -> ()
+        | Error msg -> failwith msg)

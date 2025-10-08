@@ -1,6 +1,7 @@
 (library
  (name fuzz)
- (inline_tests)
+ (inline_tests
+  (deps %{project_root}/main.py))
  (preprocess
   (pps ppx_inline_test ppx_assert ppx_sexp_conv))
  (libraries ocron core_unix sexplib))
