@@ -3,6 +3,25 @@ open Sexplib.Std
 module Time = Time_float_unix
 module Span = Time.Span
 
+module CircularList = struct
+  type 'item t = {
+    used : 'item list;
+    unused : 'item list;
+  }
+  [@@deriving sexp, compare]
+
+  let create used unused = { used; unused }
+
+  let pop t : ('item * 'item t) option =
+    match t.unused with
+    | [] -> None
+    | hd :: tl -> Some (hd, { used = hd :: t.used; unused = tl })
+
+  let reset t : 'item t = { used = []; unused = t.used }
+end
+
+module CList = CircularList
+
 type 'span element =
   | Single of 'span
   | Range of {
@@ -31,14 +50,20 @@ type expr = {
 }
 [@@deriving sexp, compare]
 
+type day =
+  | Day_of_week of Day_of_week.t
+  | Day of int
+[@@deriving sexp, compare]
+
+type partial_date = {
+  month : Month.t;
+  day : day;
+}
+[@@deriving sexp, compare]
+
 type schedule = {
-  minute : Span.t list;
-  hour : Span.t list;
-  day_of_month : Span.t list;
-  month : Month.t list;
-  day_of_week : Day_of_week.t list;
-  (* TODO: Collapse above day and month fields into [dates] *)
-  dates : Date.t list;
+  spans : Span.t CList.t;  (** Store for producing new values *)
+  dates : partial_date CList.t;  (** Store for producing new values *)
 }
 [@@deriving sexp, compare]
 
@@ -159,9 +184,23 @@ module Schedule = struct
     | Value el -> element_to_month el
     | List els -> List.concat_map els ~f:(fun el -> element_to_month el)
 
+  let element_to_day_of_week (element : 'time element) : Day_of_week.t list =
+    match element with
+    | Single el -> [ el ]
+    | Range { min; max } ->
+        List.filter Day_of_week.all ~f:(fun day_of_week ->
+            Day_of_week.( >= ) min day_of_week
+            && Day_of_week.( >= ) day_of_week max)
+
+  let value_to_day_of_week (value : 'time value) : Day_of_week.t list =
+    match value with
+    | All -> Day_of_week.all
+    | Value el -> element_to_day_of_week el
+    | List els -> List.concat_map els ~f:(fun el -> element_to_day_of_week el)
+
   (** Convert cron syntax to types that correspond to the time units *)
-  let expr_to_schedule ({ minute; hour; day_of_month; month; _ } : expr) :
-      schedule =
+  let expr_to_schedule expr after : schedule =
+    let { minute; hour; day_of_month; month; day_of_week } = expr in
     let minute =
       value_to_span ~min:min_minute ~max:max_minute
         ~to_span:(fun int -> Span.create ~min:int ())
@@ -181,67 +220,10 @@ module Schedule = struct
         day_of_month
     in
     let month = value_to_month month in
-    { minute; hour; day_of_month; month; day_of_week = []; dates = [] }
-
-  module CircularList = struct
-    type 'item t = {
-      used : 'item list;
-      unused : 'item list;
-    }
-    [@@deriving sexp, compare]
-
-    let create used unused = { used; unused }
-
-    let pop t : ('item * 'item t) option =
-      match t.unused with
-      | [] -> None
-      | hd :: tl -> Some (hd, { used = hd :: t.used; unused = tl })
-
-    let reset t : 'item t = { used = []; unused = t.used }
-  end
-
-  module CList = CircularList
-
-  type partial_date = Month.t * Span.t [@@deriving sexp, compare]
-
-  type sequence_state = {
-    spans : Span.t CList.t;  (** Store for producing new values *)
-    dates : partial_date CList.t;  (** Store for producing new values *)
-    current_date : Date.t;  (** Save for next iteration *)
-  }
-  [@@deriving sexp, compare]
-
-  let rec find_next_date dates current_date : Date.t * partial_date CList.t =
-    match CList.pop dates with
-    | Some (date, dates) ->
-        let month, day = date in
-        let year = Date.year current_date in
-        let day = Span.to_day day |> int_of_float in
-        let next_date = Date.create_exn ~y:year ~m:month ~d:day in
-
-        if Date.(next_date > current_date) then (next_date, dates)
-        else find_next_date dates current_date
-    | None ->
-        let dates = CList.reset dates in
-        let date, dates = CList.pop dates |> Option.value_exn in
-
-        (* If dates is empty, create dates with next year *)
-        let month, day = date in
-        let year = Date.year current_date + 1 in
-        let day = Span.to_day day |> int_of_float in
-        let current_date = Date.create_exn ~y:year ~m:month ~d:day in
-
-        (current_date, dates)
-
-  let upcoming ?start_from schedule : Time.t Sequence.t =
-    (* TODO: For day_of_month and day_of_week create a union of two sets of dates *)
-    let { minute; hour; day_of_month; month; day_of_week = _; dates = _ } =
-      schedule
-    in
+    let day_of_week = value_to_day_of_week day_of_week in
 
     let zone = Lazy.force Time.Zone.local in
-    let start_from = Option.value ~default:(Time.now ()) start_from in
-    let current_date, current_ofday = Time.to_date_ofday ~zone start_from in
+    let current_date, current_ofday = Time.to_date_ofday ~zone after in
 
     let used, unused =
       let curr_span = Time.Ofday.to_span_since_start_of_day current_ofday in
@@ -252,48 +234,90 @@ module Schedule = struct
     let spans = CList.create used unused in
 
     let used, unused =
-      let curr_year = Date.year current_date in
-      let mdom = List.cartesian_product month day_of_month in
-      (* let mdow =
+      let day_of_month =
+        List.cartesian_product month day_of_month
+        |> List.map ~f:(fun (month, day) ->
+               { month; day = Day (Span.to_day day |> int_of_float) })
+      in
+      let day_of_week =
         List.cartesian_product month day_of_week
-        |> List.concat_map ~f:(fun (month, _day_of_week) ->
-               [ (month, Span.of_int_day 0) ])
-       in
-       List.concat [ mdom; mdow ]
-      |> List.dedup_and_sort unique_month_and_day ~compare:(fun _a _b -> 0) *)
-      mdom
-      |> List.split_while ~f:(fun (month, day) ->
-             try
-               let day = Span.to_day day |> int_of_float in
-               let date = Date.create_exn ~y:curr_year ~m:month ~d:day in
-               Date.( < ) date current_date
-             with _ -> true)
+        |> List.map ~f:(fun (month, day_of_week) ->
+               { month; day = Day_of_week day_of_week })
+      in
+      let days = List.append day_of_month day_of_week in
+      let curr_year = Date.year current_date in
+      ([], [])
     in
     let dates = CList.create used unused in
 
-    Sequence.unfold ~init:{ spans; dates; current_date }
-      ~f:(fun { spans; dates; current_date } ->
+    { dates; spans }
+
+  let rec find_next_date dates after : Date.t * partial_date CList.t =
+    match CList.pop dates with
+    | Some (date, dates) ->
+        let month, day = date in
+        let year = Date.year after in
+        let day = Span.to_day day |> int_of_float in
+        let next_date = Date.create_exn ~y:year ~m:month ~d:day in
+
+        if Date.(next_date > after) then (next_date, dates)
+        else find_next_date dates after
+    | None ->
+        let dates = CList.reset dates in
+        let date, dates = CList.pop dates |> Option.value_exn in
+
+        (* If dates is empty, create dates with next year *)
+        let month, day = date in
+        let year = Date.year after + 1 in
+        let day = Span.to_day day |> int_of_float in
+        let current_date = Date.create_exn ~y:year ~m:month ~d:day in
+
+        (current_date, dates)
+
+  let convert partial_dates after : Date.t Sequence.t =
+    Sequence.unfold_step ~init:after ~f:(fun after ->
+        let date =
+          List.find_map partial_dates ~f:(fun { month; day } ->
+              let we_want =
+                Month.(Date.month after = month)
+                &&
+                match day with
+                | Day day -> Date.day after = day
+                | Day_of_week dow -> Day_of_week.(Date.day_of_week after = dow)
+              in
+              if we_want then Some after else None)
+        in
+        match date with
+        | Some date -> Yield { value = date; state = date }
+        | None -> Skip { state = Date.add_days after 1 })
+
+  let upcoming schedule after : Time.t Sequence.t =
+    let zone = Lazy.force Time.Zone.local in
+
+    (* TODO: For day_of_month and day_of_week create a union of two sets of dates *)
+    Sequence.unfold ~init:(schedule, after) ~f:(fun ({ spans; dates }, after) ->
         (* Pop spans until spans is empty *)
         match CList.pop spans with
         | Some (span, spans) ->
             let ofday = Time.Ofday.of_span_since_start_of_day_exn span in
 
-            let time = Time.of_date_ofday ~zone current_date ofday in
-            Some (time, { spans; dates; current_date })
+            let time = Time.of_date_ofday ~zone after ofday in
+            Some (time, ({ spans; dates }, after))
         | None ->
-            let current_date, dates = find_next_date dates current_date in
+            let after, dates = find_next_date dates after in
 
             (* If spans is empty, generate next date *)
             let spans = CList.reset spans in
             let span, spans = CList.pop spans |> Option.value_exn in
             let ofday = Time.Ofday.of_span_since_start_of_day_exn span in
 
-            let time = Time.of_date_ofday ~zone current_date ofday in
-            Some (time, { spans; dates; current_date }))
+            let time = Time.of_date_ofday ~zone after ofday in
+            Some (time, ({ spans; dates }, after)))
 end
 
 let parse = Parse.parse
 
 let upcoming ?start_from cron_expr : Time.t Sequence.t =
-  let schedule = Schedule.expr_to_schedule cron_expr in
-  Schedule.upcoming schedule ?start_from
+  let start_from = Option.value ~default:(Time.now ()) start_from in
+  let schedule = Schedule.expr_to_schedule cron_expr start_from in
+  Schedule.upcoming schedule start_from
