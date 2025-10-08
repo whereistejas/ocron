@@ -2,7 +2,6 @@ open Core
 open Sexplib.Std
 module Time = Time_float_unix
 module Span = Time.Span
-module Zone = Time.Zone
 
 type 'span element =
   | Single of 'span
@@ -18,7 +17,7 @@ type 'span value =
   | List of 'span element list
 [@@deriving sexp, compare]
 
-type schedule = {
+type expr = {
   (* Valid values: [0,59] *)
   minute : Span.t value;
   (* Valid values: [0,23] *)
@@ -32,7 +31,7 @@ type schedule = {
 }
 [@@deriving sexp, compare]
 
-type intermediate_schedule = {
+type schedule = {
   minute : Span.t list;
   hour : Span.t list;
   day_of_month : Span.t list;
@@ -54,12 +53,12 @@ module U = struct
   let print_debug name sexp_of value =
     Printf.printf "%s: %s\n" name (Sexp.to_string_hum (sexp_of value))
 
-  let debug_schedule
-      ({ minute; hour; day_of_month; month; _ } : intermediate_schedule) =
-    let () = print_debug "minute" [%sexp_of: Span.t list] minute in
-    let () = print_debug "hour" [%sexp_of: Span.t list] hour in
-    let () = print_debug "day_of_month" [%sexp_of: Span.t list] day_of_month in
-    let () = print_debug "month" [%sexp_of: Month.t list] month in
+  let _print_expr ({ minute; hour; day_of_month; month; day_of_week } : expr) =
+    let () = print_debug "minute" [%sexp_of: Span.t value] minute in
+    let () = print_debug "hour" [%sexp_of: Span.t value] hour in
+    let () = print_debug "day_of_month" [%sexp_of: Span.t value] day_of_month in
+    let () = print_debug "month" [%sexp_of: Month.t value] month in
+    let () = print_debug "month" [%sexp_of: Day_of_week.t value] day_of_week in
     ()
 end
 
@@ -107,7 +106,7 @@ module Parse = struct
         List elements
     | value -> Value (parse_element value parse)
 
-  let parse (value : string) : schedule =
+  let parse (value : string) : expr =
     let minute_str, hour_str, day_str, month_str, dow_str = tokenise value in
     let minute = parse_value minute_str (fun min -> Time.Span.create ~min ()) in
     let hour = parse_value hour_str (fun hr -> Time.Span.create ~hr ()) in
@@ -119,7 +118,7 @@ module Parse = struct
     { minute; hour; day_of_month = day; month; day_of_week }
 end
 
-module ToTime = struct
+module Schedule = struct
   (* The specification of days can be made by two fields (day
    * of the month and day of the week). If month, day of month, and day
    * of week are all <asterisk> characters, every day shall be matched.
@@ -161,8 +160,8 @@ module ToTime = struct
     | List els -> List.concat_map els ~f:(fun el -> element_to_month el)
 
   (** Convert cron syntax to types that correspond to the time units *)
-  let schedule_to_time ({ minute; hour; day_of_month; month; _ } : schedule) :
-      intermediate_schedule =
+  let expr_to_schedule ({ minute; hour; day_of_month; month; _ } : expr) :
+      schedule =
     let minute =
       value_to_span ~min:min_minute ~max:max_minute
         ~to_span:(fun int -> Span.create ~min:int ())
@@ -183,73 +182,118 @@ module ToTime = struct
     in
     let month = value_to_month month in
     { minute; hour; day_of_month; month; day_of_week = []; dates = [] }
-end
 
-module Schedule = struct
-  let calculate_dates ?(skip_until : Month.t option) year schedule =
-    let months =
-      Option.value_map skip_until
-        ~f:(fun skip ->
-          List.filter schedule.month ~f:(fun month -> Month.( >= ) month skip))
-        ~default:schedule.month
-    in
+  module CircularList = struct
+    type 'item t = {
+      used : 'item list;
+      unused : 'item list;
+    }
+    [@@deriving sexp, compare]
 
-    List.cartesian_product months schedule.day_of_month
-    |> List.filter_map ~f:(fun (month, day) ->
-           let day = Span.to_day day |> int_of_float in
-           (* NOTE: Skipping invalid days (like 29 Feb in non-leap years) *)
-           try Some (Date.create_exn ~y:year ~m:month ~d:day) with _ -> None)
+    let create used unused = { used; unused }
 
-  let merge_dates_and_times zone dates times =
-    List.cartesian_product dates times
-    |> List.map ~f:(fun (date, time) ->
-           let parts = Span.to_parts time in
-           let ofday = Time.Ofday.create ~hr:parts.hr ~min:parts.min () in
-           Time.of_date_ofday ~zone date ofday)
+    let pop t : ('item * 'item t) option =
+      match t.unused with
+      | [] -> None
+      | hd :: tl -> Some (hd, { used = hd :: t.used; unused = tl })
 
-  (** Returns next occurrence *)
-  let next ?start_from schedule : Time.t =
-    let zone = Lazy.force Zone.local in
+    let reset t : 'item t = { used = []; unused = t.used }
+  end
 
-    let s = ToTime.schedule_to_time schedule in
-    let () = U.debug_schedule s in
+  module CList = CircularList
 
-    let today = Option.value start_from ~default:(Time.now ()) in
-    let date = Time.to_date ~zone today in
+  type partial_date = Month.t * Span.t [@@deriving sexp, compare]
 
-    let times =
-      let hours_and_minutes = List.cartesian_product s.hour s.minute in
-      List.map hours_and_minutes ~f:(fun (hr, min) -> Span.( + ) hr min)
-    in
+  type sequence_state = {
+    spans : Span.t CList.t;  (** Store for producing new values *)
+    dates : partial_date CList.t;  (** Store for producing new values *)
+    current_date : Date.t;  (** Save for next iteration *)
+  }
+  [@@deriving sexp, compare]
 
-    let next_datetime schedule times : Time.t = Time.now () in
+  let rec find_next_date dates current_date : Date.t * partial_date CList.t =
+    match CList.pop dates with
+    | Some (date, dates) ->
+        let month, day = date in
+        let year = Date.year current_date in
+        let day = Span.to_day day |> int_of_float in
+        let next_date = Date.create_exn ~y:year ~m:month ~d:day in
 
-    let rec find_nearest_datetime next_datetime nearest_to : Time.t =
-      let datetime, next_datetime =
-        Option.value_exn (Sequence.next next_datetime)
-      in
-      if Time.( >= ) datetime nearest_to then datetime
-      else find_nearest_datetime next_datetime nearest_to
-    in
-
-    Time.epoch
-
-  (* let dates =
-      calculate_dates ~skip_until:(Date.month date) (Date.year date) s
-    in
-    let () = U.print_debug "dates" [%sexp_of: Date.t list] dates in
-
-    (* Find the first datetime that is >= today *)
-    let datetimes = merge_dates_and_times zone dates times in
-    match List.find datetimes ~f:(fun dt -> Time.( >= ) dt today) with
-    | Some next_time -> next_time
+        if Date.(next_date > current_date) then (next_date, dates)
+        else find_next_date dates current_date
     | None ->
-        (* If no match in current year, try next year *)
-        let next_year = Date.year date + 1 in
-        let new_dates = calculate_dates next_year s in
-        let datetimes = merge_dates_and_times zone new_dates times in
-        List.hd_exn datetimes *)
+        let dates = CList.reset dates in
+        let date, dates = CList.pop dates |> Option.value_exn in
+
+        (* If dates is empty, create dates with next year *)
+        let month, day = date in
+        let year = Date.year current_date + 1 in
+        let day = Span.to_day day |> int_of_float in
+        let current_date = Date.create_exn ~y:year ~m:month ~d:day in
+
+        (current_date, dates)
+
+  let upcoming ?start_from schedule : Time.t Sequence.t =
+    (* TODO: For day_of_month and day_of_week create a union of two sets of dates *)
+    let { minute; hour; day_of_month; month; day_of_week = _; dates = _ } =
+      schedule
+    in
+
+    let zone = Lazy.force Time.Zone.local in
+    let start_from = Option.value ~default:(Time.now ()) start_from in
+    let current_date, current_ofday = Time.to_date_ofday ~zone start_from in
+
+    let used, unused =
+      let curr_span = Time.Ofday.to_span_since_start_of_day current_ofday in
+      List.cartesian_product hour minute
+      |> List.map ~f:(fun (hr, min) -> Span.( + ) hr min)
+      |> List.split_while ~f:(fun span -> Span.( < ) span curr_span)
+    in
+    let spans = CList.create used unused in
+
+    let used, unused =
+      let curr_year = Date.year current_date in
+      let mdom = List.cartesian_product month day_of_month in
+      (* let mdow =
+        List.cartesian_product month day_of_week
+        |> List.concat_map ~f:(fun (month, _day_of_week) ->
+               [ (month, Span.of_int_day 0) ])
+       in
+       List.concat [ mdom; mdow ]
+      |> List.dedup_and_sort unique_month_and_day ~compare:(fun _a _b -> 0) *)
+      mdom
+      |> List.split_while ~f:(fun (month, day) ->
+             try
+               let day = Span.to_day day |> int_of_float in
+               let date = Date.create_exn ~y:curr_year ~m:month ~d:day in
+               Date.( < ) date current_date
+             with _ -> true)
+    in
+    let dates = CList.create used unused in
+
+    Sequence.unfold ~init:{ spans; dates; current_date }
+      ~f:(fun { spans; dates; current_date } ->
+        (* Pop spans until spans is empty *)
+        match CList.pop spans with
+        | Some (span, spans) ->
+            let ofday = Time.Ofday.of_span_since_start_of_day_exn span in
+
+            let time = Time.of_date_ofday ~zone current_date ofday in
+            Some (time, { spans; dates; current_date })
+        | None ->
+            let current_date, dates = find_next_date dates current_date in
+
+            (* If spans is empty, generate next date *)
+            let spans = CList.reset spans in
+            let span, spans = CList.pop spans |> Option.value_exn in
+            let ofday = Time.Ofday.of_span_since_start_of_day_exn span in
+
+            let time = Time.of_date_ofday ~zone current_date ofday in
+            Some (time, { spans; dates; current_date }))
 end
 
 let parse = Parse.parse
-let next = Schedule.next
+
+let upcoming ?start_from cron_expr : Time.t Sequence.t =
+  let schedule = Schedule.expr_to_schedule cron_expr in
+  Schedule.upcoming schedule ?start_from

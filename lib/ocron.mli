@@ -21,7 +21,7 @@ type 'span value =
   | List of 'span element list
 [@@deriving sexp, compare]
 
-type schedule = {
+type expr = {
   minute : Span.t value;  (** Valid values: [0,59] *)
   hour : Span.t value;  (** Valid values: [0,23] *)
   day_of_month : Span.t value;  (** Valid values: [1,31] *)
@@ -31,7 +31,7 @@ type schedule = {
 [@@deriving sexp, compare]
 (** A complete cron schedule specification *)
 
-val parse : string -> schedule
+val parse : string -> expr
 (** Parse a cron expression string into a schedule.
 
     The cron expression should be in standard format:
@@ -41,9 +41,9 @@ val parse : string -> schedule
 
     @raise Invalid_argument if the cron expression is malformed *)
 
-val next : ?start_from:Time.t -> schedule -> Time.t
-(** Calculate the next occurrence time for a given schedule.
+val upcoming : ?start_from:Time.t -> expr -> Time.t Sequence.t
+(** Calculate the upcoming occurrence time for a given schedule.
 
     @param start_from Optional starting time (defaults to current time)
     @param schedule The cron schedule to evaluate
-    @return The next time the schedule will occur *)
+    @return The upcoming time the schedule will occur *)

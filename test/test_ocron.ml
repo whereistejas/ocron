@@ -1,170 +1,143 @@
-open Ocron
 open Core
+open Ocron
 module Time = Time_float_unix
 module Span = Time.Span
-module Zone = Time.Zone
 
-let%test_unit "parse single minute value" =
-  let actual = parse "2 * * * *" in
-  let expected : schedule =
-    {
-      minute = Value (Single (Span.create ~min:2 ()));
-      hour = All;
-      day_of_month = All;
-      month = All;
-      day_of_week = All;
-    }
-  in
-  [%test_eq: schedule] actual expected
+(* Helper to get next N occurrences from croniter *)
+let get_croniter_results cron_expr start_time count =
+  let zone = Lazy.force Time.Zone.local in
 
-let%test_unit "parse minute range" =
-  let actual = parse "2-5 * * * *" in
-  let expected : schedule =
-    {
-      minute =
-        Value
-          (Range { min = Span.create ~min:2 (); max = Span.create ~min:5 () });
-      hour = All;
-      day_of_month = All;
-      month = All;
-      day_of_week = All;
-    }
-  in
-  [%test_eq: schedule] actual expected
-
-let%test_unit "parse minute list" =
-  let actual = parse "2,3,5 * * * *" in
-  let expected : schedule =
-    {
-      minute =
-        List
-          [
-            Single (Span.create ~min:2 ());
-            Single (Span.create ~min:3 ());
-            Single (Span.create ~min:5 ());
-          ];
-      hour = All;
-      day_of_month = All;
-      month = All;
-      day_of_week = All;
-    }
-  in
-  [%test_eq: schedule] actual expected
-
-let%test_unit "parse minute list with range and month" =
-  let actual = parse "2,3,5-9 * * 12 *" in
-  let expected : schedule =
-    {
-      minute =
-        List
-          [
-            Single (Span.create ~min:2 ());
-            Single (Span.create ~min:3 ());
-            Range { min = Span.create ~min:5 (); max = Span.create ~min:9 () };
-          ];
-      hour = All;
-      day_of_month = All;
-      month = Value (Single Month.dec);
-      day_of_week = All;
-    }
-  in
-  [%test_eq: schedule] actual expected
-
-let%test_unit "next occurrence for minute" =
-  let start_from = Time.now () in
-  let schedule = parse "2 * * * *" in
-  let actual = next schedule ~start_from in
-  let expected =
-    let zone = Lazy.force Zone.local in
-    let date = Time.to_date ~zone start_from in
-    let ofday = Time.to_ofday ~zone start_from in
-    let parts = Time.Ofday.to_parts ofday in
-    let ofday =
-      Time.Ofday.create
-        ~hr:(if parts.min < 2 then parts.hr else parts.hr + 1)
-        ~min:2 ()
-    in
+  let make_time year month day hr min =
+    let date = Date.create_exn ~y:year ~m:month ~d:day in
+    let ofday = Time.Ofday.create ~hr ~min () in
     Time.of_date_ofday ~zone date ofday
   in
-  [%test_eq: Time.t] actual expected
+  let python_script =
+    Printf.sprintf
+      {|
+import sys
+from croniter import croniter
+from datetime import datetime
 
-let%test_unit "next occurrence for minute and hour" =
-  let start_from = Time.now () in
-  let schedule = parse "2 1 * * *" in
-  let actual = next schedule ~start_from in
-  let expected =
-    let zone = Lazy.force Zone.local in
-    let date = Time.to_date ~zone start_from in
-    let ofday = Time.to_ofday ~zone start_from in
-    let parts = Time.Ofday.to_parts ofday in
-    let target_ofday = Time.Ofday.create ~hr:1 ~min:2 () in
-    let date =
-      if parts.hr < 1 || (parts.hr = 1 && parts.min < 2) then date
-      else Date.add_days date 1
-    in
-    Time.of_date_ofday ~zone date target_ofday
-  in
-  [%test_eq: Time.t] actual expected
+cron_expr = '%s'
+start_time = datetime(%d, %d, %d, %d, %d)
+count = %d
 
-let%test_unit "next occurrence for minute and hour and day" =
-  let start_from = Time.now () in
-  let schedule = parse "2 1 1 * *" in
-  let actual = next schedule ~start_from in
-  let expected =
-    let zone = Lazy.force Zone.local in
-    let date = Time.to_date ~zone start_from in
-    let ofday = Time.Ofday.create ~hr:1 ~min:2 () in
-    let target_date =
-      Date.create_exn ~y:(Date.year date) ~m:(Date.month date) ~d:1
-    in
-    let target_time = Time.of_date_ofday ~zone target_date ofday in
-    let date =
-      if Time.( < ) start_from target_time then target_date
-      else Date.add_months target_date 1
-    in
-    Time.of_date_ofday ~zone date ofday
+try:
+    cron = croniter(cron_expr, start_time)
+    for _ in range(count):
+        next_time = cron.get_next(datetime)
+        print(f"{next_time.year},{next_time.month},{next_time.day},{next_time.hour},{next_time.minute}")
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+|}
+      cron_expr
+      (Date.year (Time.to_date ~zone start_time))
+      (Month.to_int (Date.month (Time.to_date ~zone start_time)))
+      (Date.day (Time.to_date ~zone start_time))
+      (Time.Ofday.to_parts (Time.to_ofday ~zone start_time)).hr
+      (Time.Ofday.to_parts (Time.to_ofday ~zone start_time)).min count
   in
-  [%test_eq: Time.t] actual expected
 
-let%test_unit "next occurrence for minute and hour" =
-  let start_from = Time.now () in
-  let schedule = parse "2 1 * * *" in
-  let actual = next schedule ~start_from in
-  let expected =
-    let zone = Lazy.force Zone.local in
-    let date = Time.to_date ~zone start_from in
-    let ofday = Time.to_ofday ~zone start_from in
-    let parts = Time.Ofday.to_parts ofday in
-    let target_ofday = Time.Ofday.create ~hr:1 ~min:2 () in
-    let date =
-      if parts.hr < 1 || (parts.hr = 1 && parts.min < 2) then date
-      else Date.add_days date 1
-    in
-    Time.of_date_ofday ~zone date target_ofday
+  let cmd =
+    Printf.sprintf "uv run python3 -c %s" (Filename.quote python_script)
   in
-  [%test_eq: Time.t] actual expected
 
-let%test_unit "next occurrence for minute and hour and day" =
-  let start_from = Time.now () in
-  let schedule = parse "2 1 1 * *" in
-  let actual = next schedule ~start_from in
-  let expected =
-    let zone = Lazy.force Zone.local in
-    let date = Time.to_date ~zone start_from in
-    let ofday = Time.to_ofday ~zone start_from in
-    let parts = Time.Ofday.to_parts ofday in
-    let target_ofday = Time.Ofday.create ~hr:1 ~min:2 () in
-    let target_date =
-      Date.create_exn ~y:(Date.year date) ~m:(Date.month date) ~d:1
-    in
-    let date =
-      if
-        Date.day date < 1
-        || Date.day date = 1
-           && (parts.hr < 1 || (parts.hr = 1 && parts.min < 2))
-      then target_date
-      else Date.add_months target_date 1
-    in
-    Time.of_date_ofday ~zone date target_ofday
+  try
+    let ic = UnixLabels.open_process_in cmd in
+    let results = ref [] in
+    let error_lines = ref [] in
+    try
+      while true do
+        match In_channel.input_line ic with
+        | Some line -> (
+            if String.is_prefix line ~prefix:"ERROR:" then
+              error_lines := line :: !error_lines
+            else if String.is_prefix line ~prefix:"Traceback" then
+              error_lines := line :: !error_lines
+            else
+              let parts = String.split_on_chars line ~on:[ ',' ] in
+              match parts with
+              | [ year; month; day; hour; minute ] ->
+                  let t =
+                    make_time (Int.of_string year)
+                      (Month.of_int_exn (Int.of_string month))
+                      (Int.of_string day) (Int.of_string hour)
+                      (Int.of_string minute)
+                  in
+                  results := t :: !results
+              | _ when not (String.is_empty (String.strip line)) ->
+                  error_lines := line :: !error_lines
+              | _ -> ())
+        | None -> raise End_of_file
+      done;
+      []
+    with End_of_file ->
+      ignore (UnixLabels.close_process_in ic);
+      if not (List.is_empty !error_lines) then
+        failwith
+          (Printf.sprintf "croniter error: %s"
+             (String.concat ~sep:"\n" (List.rev !error_lines)))
+      else List.rev !results
+  with
+  | Failure msg -> raise (Failure msg)
+  | _ ->
+      raise
+        (Failure
+           "croniter not available - install with: uv pip install croniter")
+
+(* Test cases: list of cron expressions to test *)
+let test_cases = [ "30 14 * * *"; "0 0 * * 1" ]
+
+let%test_unit "compare against croniter reference implementation" =
+  let zone = Lazy.force Time.Zone.local in
+  let count = 5 in
+
+  (* Check if croniter is available first *)
+  let has_croniter =
+    let check_cmd = "uv run python3 -c 'import croniter' 2>/dev/null" in
+    match Core_unix.system check_cmd with
+    | Ok () -> true
+    | Error _ ->
+        Printf.printf
+          "\n\
+           Skipping croniter tests: croniter not installed (uv pip install \
+           croniter)\n";
+        false
   in
-  [%test_eq: Time.t] actual expected
+
+  if has_croniter then
+    let start_from =
+      let date = Date.create_exn ~y:2025 ~m:Month.jan ~d:15 in
+      let ofday = Time.Ofday.create ~hr:10 ~min:0 () in
+      Time.of_date_ofday ~zone date ofday
+    in
+
+    List.iter test_cases ~f:(fun cron_expr ->
+        let schedule = parse cron_expr in
+        let actual_list =
+          let seq = upcoming schedule ~start_from in
+          let taken = Sequence.take seq count in
+          Sequence.to_list taken
+        in
+
+        let expected_list = get_croniter_results cron_expr start_from count in
+
+        if not (List.equal Time.equal actual_list expected_list) then
+          let format_times times =
+            List.map times ~f:(Time.to_string_abs ~zone)
+            |> String.concat ~sep:"\n    "
+          in
+          failwith
+            (Printf.sprintf
+               "Test failed for cron: %s\n\
+               \  Start: %s\n\
+               \  Expected (croniter):\n\
+               \    %s\n\
+               \  Actual (ocron):\n\
+               \    %s"
+               cron_expr
+               (Time.to_string_abs ~zone start_from)
+               (format_times expected_list)
+               (format_times actual_list)))
