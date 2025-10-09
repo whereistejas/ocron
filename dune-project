@@ -9,15 +9,19 @@
 
 (authors "Tejas Sanap <email@whereistejas.xyz>")
 
-(license NOLICENSE)
+(maintainers "Tejas Sanap <email@whereistejas.xyz>")
+
+
+(license "MIT")
 
 (package
  (name ocron)
- (synopsis "cron parser")
- (allow_empty)
+ (synopsis "BSD-compliant crontab parser")
  (depends
   ocaml
   base
+  core
+  core_unix
   sexplib
   ppx_sexp_conv
   ppx_compare

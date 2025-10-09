@@ -2,9 +2,8 @@ name: Test
 
 on:
     push:
-        branches: [main, master]
-    pull_request:
-        branches: [main, master]
+        branches: ["main"]
+    workflow_dispatch:
 
 jobs:
     test:
@@ -29,9 +28,12 @@ jobs:
               with:
                   enable-cache: true
 
+            - name: Create virtual environment
+              run: uv venv
+
             - name: Install Python dependencies (croniter)
               run: |
-                  uv pip install --system croniter
+                  uv pip install croniter
 
             - name: Build
               run: opam exec -- dune build

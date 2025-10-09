@@ -9,6 +9,8 @@ depends: [
   "dune" {>= "3.20"}
   "ocaml"
   "base"
+  "core"
+  "core_unix"
   "sexplib"
   "ppx_sexp_conv"
   "ppx_compare"

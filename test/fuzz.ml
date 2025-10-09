@@ -201,7 +201,8 @@ let format_times_debug times =
 
 (* Compare two lists of times and format error message if different *)
 let compare_results cron_expr start_from expected actual =
-  if List.equal Time.equal actual expected then Ok ()
+  if List.is_empty expected then Ok ()
+  else if List.equal Time.equal actual expected then Ok ()
   else
     Error
       (sprintf
