@@ -75,7 +75,7 @@ module Parse = struct
                let min = int_of_string min in
                let max = int_of_string max in
                Range { max = int_to_time max; min = int_to_time min })
-        |> Option.value_exn
+        |> Option.value_exn ~message:"Could not parse element with list syntax"
     | value ->
         let value = int_of_string value in
         Single (int_to_time value)
@@ -97,12 +97,28 @@ module Parse = struct
     let minute_str, hour_str, day_str, month_str, dow_str = tokenise value in
     let minute = parse_value minute_str (fun min -> Time.Span.create ~min ()) in
     let hour = parse_value hour_str (fun hr -> Time.Span.create ~hr ()) in
-    let day = parse_value day_str (fun day -> Time.Span.create ~day ()) in
-    let month = parse_value month_str (fun month -> Month.of_int_exn month) in
-    let day_of_week =
-      parse_value dow_str (fun day -> Day_of_week.of_int_exn day)
+    let day_of_month =
+      parse_value day_str (fun day -> Time.Span.create ~day ())
     in
-    { minute; hour; day_of_month = day; month; day_of_week }
+    let month =
+      parse_value month_str (fun month ->
+          try Month.of_int_exn month
+          with e ->
+            let msg = Exn.to_string e and stack = Printexc.get_backtrace () in
+            Printf.eprintf "there was an error converting int to month: %s%s\n"
+              msg stack;
+            raise e)
+    in
+    let day_of_week =
+      parse_value dow_str (fun day ->
+          try Day_of_week.of_int_exn day
+          with e ->
+            let msg = Exn.to_string e and stack = Printexc.get_backtrace () in
+            Printf.eprintf "there was an error converting int to month: %s%s\n"
+              msg stack;
+            raise e)
+    in
+    { minute; hour; day_of_month; month; day_of_week }
 end
 
 module Schedule = struct
@@ -119,36 +135,47 @@ module Schedule = struct
    * element or list, then any day matching either the month and day of
    * month, or the day of week, shall be matched. *)
 
-  (** TODO: Make `Span.t` generic. *)
   let element_to_time ~(to_time : int -> 'time) ~(to_int : 'time -> int)
+      ~(next_time : 'time -> 'time) ~(compare_time : 'time -> 'time -> int)
       (element : 'time element) : 'time list =
     match element with
     | Single el -> [ el ]
     | Range { min; max } ->
-        List.range (to_int min) (to_int max) |> List.map ~f:to_time
+        if compare_time min max = 0 then
+          List.range (next_time min |> to_int) (to_int max) ~stop:`inclusive
+          |> List.map ~f:to_time
+        else
+          List.range (to_int min) (to_int max) ~stop:`inclusive
+          |> List.map ~f:to_time
 
-  (** TODO: Make `Span.t` generic. *)
   let value_to_time ~(min : int) ~(max : int) ~(to_time : int -> 'time)
-      ~(to_int : 'time -> int) (value : 'time value) : 'time list =
+      ~(to_int : 'time -> int) ~(next_time : 'time -> 'time)
+      ~(compare_time : 'time -> 'time -> int) (value : 'time value) : 'time list
+      =
     match value with
-    | All -> List.range min max |> List.map ~f:to_time
-    | Value el -> element_to_time ~to_time ~to_int el
-    | List els -> List.concat_map els ~f:(element_to_time ~to_time ~to_int)
+    | All -> List.range min max ~stop:`inclusive |> List.map ~f:to_time
+    | Value el -> element_to_time ~to_time ~to_int ~next_time ~compare_time el
+    | List els ->
+        List.concat_map els
+          ~f:(element_to_time ~to_time ~to_int ~next_time ~compare_time)
 
-  (** Convert cron syntax to types that correspond to the time units *)
   let expr_to_schedule expr : schedule =
     let { minute; hour; day_of_month; month; day_of_week } = expr in
     let spans =
       let minute =
         value_to_time ~min:0 ~max:59
           ~to_time:(fun int -> Span.create ~min:int ())
-          ~to_int:(fun time -> Span.to_hr time |> int_of_float)
+          ~to_int:(fun time -> Span.to_min time |> int_of_float)
+          ~next_time:(fun time -> Span.next time)
+          ~compare_time:(fun a b -> Span.compare a b)
           minute
       in
       let hour =
         value_to_time ~min:0 ~max:23
           ~to_time:(fun int -> Span.create ~hr:int ())
-          ~to_int:(fun time -> Span.to_min time |> int_of_float)
+          ~to_int:(fun time -> Span.to_hr time |> int_of_float)
+          ~next_time:(fun time -> Span.next time)
+          ~compare_time:(fun a b -> Span.compare a b)
           hour
       in
       List.cartesian_product hour minute
@@ -159,24 +186,30 @@ module Schedule = struct
         value_to_time ~min:1 ~max:12
           ~to_time:(fun int -> Month.of_int_exn int)
           ~to_int:(fun time -> Month.to_int time)
+          ~next_time:(fun time -> Month.shift time 1)
+          ~compare_time:(fun a b -> Month.compare a b)
           month
       in
-      let calculate_day_of_month dom =
+      let calculate_day_of_month (dom : Span.t value) =
         let day_of_month =
           value_to_time ~min:1 ~max:31
             ~to_time:(fun int -> Span.create ~day:int ())
             ~to_int:(fun time -> Span.to_day time |> int_of_float)
+            ~next_time:(fun time -> Span.next time)
+            ~compare_time:(fun a b -> Span.compare a b)
             dom
         in
         List.cartesian_product month day_of_month
         |> List.map ~f:(fun (month, day) ->
                { month; day = Day_of_month (Span.to_day day |> int_of_float) })
       in
-      let calculate_day_of_week dow =
+      let calculate_day_of_week (dow : Day_of_week.t value) =
         let day_of_week =
           value_to_time ~min:0 ~max:6
             ~to_time:(fun int -> Day_of_week.of_int_exn int)
             ~to_int:(fun time -> Day_of_week.to_int time)
+            ~next_time:(fun time -> Day_of_week.shift time 1)
+            ~compare_time:(fun a b -> Day_of_week.compare a b)
             dow
         in
         List.cartesian_product month day_of_week
@@ -215,7 +248,12 @@ module Schedule = struct
                  Some date
                else None)
 
-  let upcoming ~start_from ~count schedule : Time.t list =
+  (** One pass covers all datetime's between start_from and end of year *)
+  let upcoming ~start_from schedule : Time.t list =
+    (* let () =
+      Printf.eprintf "schedule: %s\n"
+        (Sexp.to_string_hum (sexp_of_schedule schedule))
+    in *)
     let zone = Lazy.force Time.Zone.local in
     let year = Time.to_date ~zone start_from |> Date.year in
 
@@ -223,28 +261,49 @@ module Schedule = struct
 
     let dates =
       List.concat_map dates ~f:(fun date -> partial_date_to_date ~year date)
+      |> List.sort ~compare:(fun a b -> Date.(compare a b))
     in
     let dates_and_spans = List.cartesian_product dates spans in
-    let filtered_dates_and_spans =
-      List.filter_map dates_and_spans ~f:(fun (date, span) ->
-          let ofday = Time.Ofday.of_span_since_start_of_day_exn span in
-          let time = Time.of_date_ofday ~zone date ofday in
-          if Time.(time >= start_from) then Some time else None)
-    in
-    List.take filtered_dates_and_spans count
+    List.filter_map dates_and_spans ~f:(fun (date, span) ->
+        let ofday =
+          try Time.Ofday.of_span_since_start_of_day_exn span
+          with e ->
+            let msg = Exn.to_string e and stack = Printexc.get_backtrace () in
+            Printf.eprintf "there was an error converting span to ofday: %s%s\n"
+              msg stack;
+            raise e
+        in
+        let time = Time.of_date_ofday ~zone date ofday in
+        if Time.(time >= start_from) then Some time else None)
 end
 
 let parse = Parse.parse
 
 let rec upcoming ?(start_from = Time.now ()) ~count cron_expr : Time.t list =
+  (* let () =
+    Printf.eprintf "cron_expr: %s\n"
+      (Sexp.to_string_hum (sexp_of_expr cron_expr))
+  in *)
   let schedule = Schedule.expr_to_schedule cron_expr in
-  let upcoming_times = Schedule.upcoming ~start_from ~count schedule in
-  if List.length upcoming_times < count then
-    let last = List.last_exn upcoming_times in
-    let later =
-      upcoming ~start_from:last
-        ~count:(count - List.length upcoming_times)
-        cron_expr
-    in
-    List.append upcoming_times later
-  else List.take upcoming_times count
+  let upcoming_times =
+    let times = Schedule.upcoming ~start_from schedule in
+    (* let () =
+      Printf.eprintf "times: %s\n"
+        (Sexp.to_string_hum (List.sexp_of_t Time.sexp_of_t times))
+    in *)
+    if List.length times < count then
+      let zone = Lazy.force Time.Zone.local in
+      let year = Time.to_date ~zone start_from |> Date.year in
+      let day = Date.create_exn ~y:(year + 1) ~m:Month.Jan ~d:1 in
+      let ofday = Time.Ofday.start_of_day in
+      let start_from = Time.of_date_ofday ~zone day ofday in
+      let more_times =
+        upcoming ~start_from ~count:(count - List.length times) cron_expr
+      in
+      List.append times more_times
+    else times
+  in
+  let upcoming_times =
+    List.dedup_and_sort upcoming_times ~compare:Time.compare
+  in
+  List.take upcoming_times count
