@@ -48,13 +48,6 @@ type schedule = {
 }
 [@@deriving sexp, compare]
 
-let max_minute : int = 59
-let min_minute : int = 0
-let max_hour : int = 23
-let min_hour : int = 0
-let max_day_of_month : int = 31
-let min_day_of_month : int = 1
-
 module Parse = struct
   (** In the POSIX locale, the user or application shall ensure that a crontab *
       entry is a text file consisting of lines of six fields each. The fields *
@@ -126,88 +119,80 @@ module Schedule = struct
    * element or list, then any day matching either the month and day of
    * month, or the day of week, shall be matched. *)
 
-  let element_to_span ~(to_span : int -> Span.t) ~(to_int : Span.t -> int)
-      (element : 'time element) : Span.t list =
+  (** TODO: Make `Span.t` generic. *)
+  let element_to_time ~(to_time : int -> 'time) ~(to_int : 'time -> int)
+      (element : 'time element) : 'time list =
     match element with
     | Single el -> [ el ]
     | Range { min; max } ->
-        List.range (to_int min) (to_int max) |> List.map ~f:to_span
+        List.range (to_int min) (to_int max) |> List.map ~f:to_time
 
-  let value_to_span ~(min : int) ~(max : int) ~(to_span : int -> Span.t)
-      ~(to_int : Span.t -> int) (value : 'time value) : Span.t list =
+  (** TODO: Make `Span.t` generic. *)
+  let value_to_time ~(min : int) ~(max : int) ~(to_time : int -> 'time)
+      ~(to_int : 'time -> int) (value : 'time value) : 'time list =
     match value with
-    | All -> List.range min max |> List.map ~f:to_span
-    | Value el -> element_to_span ~to_span ~to_int el
-    | List els -> List.concat_map els ~f:(element_to_span ~to_span ~to_int)
-
-  let element_to_month (element : 'time element) : Month.t list =
-    match element with
-    | Single el -> [ el ]
-    | Range { min; max } ->
-        List.filter Month.all ~f:(fun month ->
-            Month.( >= ) min month && Month.( >= ) month max)
-
-  let value_to_month (value : 'time value) : Month.t list =
-    match value with
-    | All -> Month.all
-    | Value el -> element_to_month el
-    | List els -> List.concat_map els ~f:(fun el -> element_to_month el)
-
-  let element_to_day_of_week (element : 'time element) : Day_of_week.t list =
-    match element with
-    | Single el -> [ el ]
-    | Range { min; max } ->
-        List.filter Day_of_week.all ~f:(fun day_of_week ->
-            Day_of_week.( >= ) min day_of_week
-            && Day_of_week.( >= ) day_of_week max)
-
-  let value_to_day_of_week (value : 'time value) : Day_of_week.t list =
-    match value with
-    | All -> Day_of_week.all
-    | Value el -> element_to_day_of_week el
-    | List els -> List.concat_map els ~f:(fun el -> element_to_day_of_week el)
+    | All -> List.range min max |> List.map ~f:to_time
+    | Value el -> element_to_time ~to_time ~to_int el
+    | List els -> List.concat_map els ~f:(element_to_time ~to_time ~to_int)
 
   (** Convert cron syntax to types that correspond to the time units *)
   let expr_to_schedule expr : schedule =
     let { minute; hour; day_of_month; month; day_of_week } = expr in
-    let minute =
-      value_to_span ~min:min_minute ~max:max_minute
-        ~to_span:(fun int -> Span.create ~min:int ())
-        ~to_int:(fun span -> Span.to_hr span |> int_of_float)
-        minute
-    in
-    let hour =
-      value_to_span ~min:min_hour ~max:max_hour
-        ~to_span:(fun int -> Span.create ~hr:int ())
-        ~to_int:(fun span -> Span.to_min span |> int_of_float)
-        hour
-    in
-    let day_of_month =
-      value_to_span ~min:min_day_of_month ~max:max_day_of_month
-        ~to_span:(fun int -> Span.create ~day:int ())
-        ~to_int:(fun span -> Span.to_day span |> int_of_float)
-        day_of_month
-    in
-    let month = value_to_month month in
-    let day_of_week = value_to_day_of_week day_of_week in
-
     let spans =
+      let minute =
+        value_to_time ~min:0 ~max:59
+          ~to_time:(fun int -> Span.create ~min:int ())
+          ~to_int:(fun time -> Span.to_hr time |> int_of_float)
+          minute
+      in
+      let hour =
+        value_to_time ~min:0 ~max:23
+          ~to_time:(fun int -> Span.create ~hr:int ())
+          ~to_int:(fun time -> Span.to_min time |> int_of_float)
+          hour
+      in
       List.cartesian_product hour minute
       |> List.map ~f:(fun (hr, min) -> Span.( + ) hr min)
     in
-
-    (* TODO: If only day of week is specified, ignore day of month and vice-versa *)
     let dates =
-      let day_of_month =
+      let month =
+        value_to_time ~min:1 ~max:12
+          ~to_time:(fun int -> Month.of_int_exn int)
+          ~to_int:(fun time -> Month.to_int time)
+          month
+      in
+      let calculate_day_of_month dom =
+        let day_of_month =
+          value_to_time ~min:1 ~max:31
+            ~to_time:(fun int -> Span.create ~day:int ())
+            ~to_int:(fun time -> Span.to_day time |> int_of_float)
+            dom
+        in
         List.cartesian_product month day_of_month
         |> List.map ~f:(fun (month, day) ->
                { month; day = Day_of_month (Span.to_day day |> int_of_float) })
       in
-      let day_of_week =
+      let calculate_day_of_week dow =
+        let day_of_week =
+          value_to_time ~min:0 ~max:6
+            ~to_time:(fun int -> Day_of_week.of_int_exn int)
+            ~to_int:(fun time -> Day_of_week.to_int time)
+            dow
+        in
         List.cartesian_product month day_of_week
         |> List.map ~f:(fun (month, day_of_week) ->
                { month; day = Day_of_week day_of_week })
       in
+      let day_of_month, day_of_week =
+        match (day_of_month, day_of_week) with
+        | All, All | _, All -> (calculate_day_of_month day_of_month, [])
+        | All, _ -> ([], calculate_day_of_week day_of_week)
+        | _, _ ->
+            let day_of_month = calculate_day_of_month day_of_month in
+            let day_of_week = calculate_day_of_week day_of_week in
+            (day_of_month, day_of_week)
+      in
+
       List.append day_of_month day_of_week
     in
 
