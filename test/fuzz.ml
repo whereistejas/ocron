@@ -106,8 +106,8 @@ module CronGen = struct
     loop [] n
 end
 
-(* Get path to main.py in project root *)
-let main_py_path () = sprintf "%s/main.py" (Sys.getenv_exn "DUNE_SOURCEROOT")
+(* Get path to main.py in test/python directory *)
+let main_py_path () = sprintf "%s/test/python/main.py" (Sys.getenv_exn "DUNE_SOURCEROOT")
 
 (* Format time as YYYY-MM-DD HH:MM for command line *)
 let format_time_for_cli time =
@@ -120,7 +120,8 @@ let format_time_for_cli time =
 
 (* Build command to run main.py *)
 let build_command cron_expr start_time count =
-  sprintf "uv run python %s --start_from %s --count %d %s" (main_py_path ())
+  sprintf "cd %s/test/python && unset VIRTUAL_ENV && uv run python main.py --start_from %s --count %d %s"
+    (Sys.getenv_exn "DUNE_SOURCEROOT")
     (Filename.quote (format_time_for_cli start_time))
     count (Filename.quote cron_expr)
 
@@ -171,8 +172,8 @@ let get_croniter_results cron_expr start_time count =
 (* Check if main.py is available and working *)
 let check_main_py_available () =
   let check_cmd =
-    sprintf "uv run python %s --count 1 '0 0 * * *' 2>/dev/null >/dev/null"
-      (main_py_path ())
+    sprintf "cd %s/test/python && unset VIRTUAL_ENV && uv run python main.py --count 1 '0 0 * * *' 2>/dev/null >/dev/null"
+      (Sys.getenv_exn "DUNE_SOURCEROOT")
   in
   match Core_unix.system check_cmd with
   | Ok () -> true
@@ -266,7 +267,7 @@ let%test_unit "compare against croniter reference implementation" =
           eprintf "Backtrace:\n%s\n" backtrace;
           failwith "Test failed")
 
-(* let%test_unit "handwritten" =
+let%test_unit "handwritten" =
   let start_from = Time.now () in
   let count = 5 in
 
@@ -284,4 +285,4 @@ let%test_unit "compare against croniter reference implementation" =
         let backtrace = Printexc.get_backtrace () in
         eprintf "%s\n" (Exn.to_string exn);
         eprintf "Backtrace:\n%s\n" backtrace;
-        failwith "Test failed") *)
+        failwith "Test failed")

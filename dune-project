@@ -11,7 +11,6 @@
 
 (maintainers "Tejas Sanap <email@whereistejas.xyz>")
 
-
 (license "MIT")
 
 (package
@@ -23,6 +22,7 @@
   core
   core_unix
   sexplib
+  yojson
   ppx_sexp_conv
   ppx_compare
   ppx_deriving
