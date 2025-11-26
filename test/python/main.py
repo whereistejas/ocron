@@ -1,32 +1,31 @@
-import sys
 import argparse
-from croniter import croniter
+import sys
 from datetime import datetime
+
+from croniter import croniter
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Generate next occurrence times for a cron expression'
+        description="Generate next occurrence times for a cron expression"
     )
 
     parser.add_argument(
-        '--start_from',
+        "--start_from",
         type=str,
         help='Start time in format "YYYY-MM-DD HH:MM" (default: current time)',
-        default=None
+        default=None,
     )
 
     parser.add_argument(
-        '--count',
+        "--count",
         type=int,
-        help='Number of occurrences to generate (default: 1)',
-        default=1
+        help="Number of occurrences to generate (default: 1)",
+        default=1,
     )
 
     parser.add_argument(
-        'cron_expr',
-        type=str,
-        help='Cron expression (e.g., "0 0 * * *")'
+        "cron_expr", type=str, help='Cron expression (e.g., "0 0 * * *")'
     )
 
     args = parser.parse_args()
@@ -36,7 +35,10 @@ def main():
         try:
             start_time = datetime.strptime(args.start_from, "%Y-%m-%d %H:%M")
         except ValueError:
-            print(f"ERROR: Invalid start_from format. Use 'YYYY-MM-DD HH:MM'", file=sys.stderr)
+            print(
+                "ERROR: Invalid start_from format. Use 'YYYY-MM-DD HH:MM'",
+                file=sys.stderr,
+            )
             sys.exit(1)
     else:
         start_time = datetime.now()
