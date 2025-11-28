@@ -8,7 +8,7 @@ homepage: "https://github.com/whereistejas/ocron"
 bug-reports: "https://github.com/whereistejas/ocron/issues"
 depends: [
   "dune" {>= "3.20"}
-  "ocaml"
+  "ocaml" {>= "5.2"}
   "base"
   "core"
   "core_unix"

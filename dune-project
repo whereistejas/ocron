@@ -2,14 +2,10 @@
 
 (name ocron)
 
-(ocaml
- (>= 5.2))
-
 (generate_opam_files true)
 
 (source
- (github whereistejas/ocron)
- (sourcehut ~whereistejas/ocron))
+ (github whereistejas/ocron))
 
 (authors "Tejas Sanap <email@whereistejas.xyz>")
 
@@ -21,7 +17,8 @@
  (name ocron)
  (synopsis "BSD-compliant crontab parser")
  (depends
-  ocaml
+  (ocaml
+   (>= 5.2))
   base
   core
   core_unix

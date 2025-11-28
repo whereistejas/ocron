@@ -1,0 +1,35 @@
+image: alpine/edge
+packages:
+  - ocaml
+  - opam
+  - dune
+  - python3
+  - curl
+  - build-base
+  - m4
+  - linux-headers
+  - git
+sources:
+  - https://git.sr.ht/~whereistejas/ocron
+tasks:
+  - install-ocaml-and-dependencies: |
+      opam init --bare --disable-sandboxing --auto-setup -y
+      cd ~/ocron
+      opam switch create 5.2.0 --deps-only --with-test --assume-depexts -y
+      eval $(opam env)
+  - install-uv-and-python-dependencies: |
+      curl -LsSf https://astral.sh/uv/install.sh | sh
+      export PATH="$HOME/.cargo/bin:$PATH"
+      cd ~/ocron/tests/python
+      uv venv
+      uv pip install croniter
+  - build: |
+      cd ~/ocron
+      eval $(opam env)
+      opam exec -- dune build
+  - test: |
+      cd ~/ocron
+      eval $(opam env)
+      export PATH="$HOME/.cargo/bin:$PATH"
+      source ~/ocron/tests/python/venv/bin/activate
+      opam exec -- dune runtest
