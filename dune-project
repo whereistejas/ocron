@@ -2,10 +2,14 @@
 
 (name ocron)
 
+(ocaml
+ (>= 5.2))
+
 (generate_opam_files true)
 
 (source
- (github whereistejas/ocron))
+ (github whereistejas/ocron)
+ (sourcehut ~whereistejas/ocron))
 
 (authors "Tejas Sanap <email@whereistejas.xyz>")
 
